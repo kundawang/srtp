@@ -31,6 +31,14 @@ const (
 
 // nolint:cyclop
 func (c *Context) decryptRTCP(dst, encrypted []byte) ([]byte, error) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	return c.decryptRTCPLocked(dst, encrypted)
+}
+
+// nolint:cyclop
+func (c *Context) decryptRTCPLocked(dst, encrypted []byte) ([]byte, error) {
 	authTagLen, err := c.cipher.AuthTagRTCPLen()
 	if err != nil {
 		return nil, err
@@ -49,11 +57,12 @@ func (c *Context) decryptRTCP(dst, encrypted []byte) ([]byte, error) {
 	index := c.cipher.getRTCPIndex(encrypted)
 	ssrc := binary.BigEndian.Uint32(encrypted[4:])
 
-	// The SSRC is read from the unauthenticated RTCP header at this point.
-	// getSRTCPSSRCState is called in read-only mode so that no new map entry is
-	// inserted until after the auth tag has been verified. The state is committed
-	// to the map by setSRTCPSSRCState only after Accept() succeeds below.
-	ssrcState, existingState := c.getSRTCPSSRCState(ssrc, false)
+	// The SSRC is read from the unauthenticated RTCP header at this point. The
+	// state is looked up in read-only mode so that no new map entry is inserted
+	// until after the auth tag has been verified. The state is committed to the
+	// map directly below (stateMu is held for the whole call) only after
+	// Accept() succeeds.
+	ssrcState, existingState := c.getSRTCPSSRCStateLocked(ssrc, false)
 
 	// The replay check is intentionally performed before authentication.
 	// Rejecting already-seen sequence numbers here avoids the CPU cost of
@@ -96,7 +105,7 @@ func (c *Context) decryptRTCP(dst, encrypted []byte) ([]byte, error) {
 	}
 
 	if !existingState {
-		c.setSRTCPSSRCState(ssrcState)
+		c.srtcpSSRCStates[ssrcState.ssrc] = ssrcState
 	}
 
 	return out, nil
@@ -116,12 +125,19 @@ func (c *Context) DecryptRTCP(dst, encrypted []byte, header *rtcp.Header) ([]byt
 }
 
 func (c *Context) encryptRTCP(dst, decrypted []byte) ([]byte, error) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	return c.encryptRTCPLocked(dst, decrypted)
+}
+
+func (c *Context) encryptRTCPLocked(dst, decrypted []byte) ([]byte, error) {
 	if len(decrypted) < srtcpHeaderSize {
 		return nil, fmt.Errorf("%w: %d", errTooShortRTCP, len(decrypted))
 	}
 
 	ssrc := binary.BigEndian.Uint32(decrypted[4:])
-	ssrcState, _ := c.getSRTCPSSRCState(ssrc, true)
+	ssrcState, _ := c.getSRTCPSSRCStateLocked(ssrc, true)
 
 	if ssrcState.srtcpIndex >= maxSRTCPIndex {
 		// ... when 2^48 SRTP packets or 2^31 SRTCP packets have been secured with the same key

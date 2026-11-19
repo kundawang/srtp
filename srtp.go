@@ -23,6 +23,14 @@ Simplified structure of SRTP Packets:
 
 // nolint:cyclop
 func (c *Context) decryptRTP(dst, ciphertext []byte, header *rtp.Header, headerLen int) ([]byte, error) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	return c.decryptRTPLocked(dst, ciphertext, header, headerLen)
+}
+
+// nolint:cyclop
+func (c *Context) decryptRTPLocked(dst, ciphertext []byte, header *rtp.Header, headerLen int) ([]byte, error) {
 	authTagLen, err := c.cipher.AuthTagRTPLen()
 	if err != nil {
 		return nil, err
@@ -41,11 +49,12 @@ func (c *Context) decryptRTP(dst, ciphertext []byte, header *rtp.Header, headerL
 		return nil, fmt.Errorf("%w: %d", errTooShortRTP, len(ciphertext))
 	}
 
-	// The SSRC in the RTP header is unauthenticated at this point. getSRTPSSRCState is
-	// called in read-only mode (existingState tracks whether it was pre-existing) so that
+	// The SSRC in the RTP header is unauthenticated at this point. The state is looked
+	// up in read-only mode (existingState tracks whether it was pre-existing) so that
 	// no new map entry is inserted until after the auth tag has been verified. The state
-	// is committed to the map by setSRTPSSRCState only after Accept() succeeds below.
-	ssrcState, existingState := c.getSRTPSSRCState(header.SSRC, false)
+	// is committed to the map directly below (stateMu is held for the whole call) only
+	// after Accept() succeeds.
+	ssrcState, existingState := c.getSRTPSSRCStateLocked(header.SSRC, false)
 
 	var roc uint32
 	var diff int64
@@ -112,7 +121,7 @@ func (c *Context) decryptRTP(dst, ciphertext []byte, header *rtp.Header, headerL
 	ssrcState.updateRolloverCount(header.SequenceNumber, diff, hasRocInPacket, roc)
 
 	if !existingState {
-		c.setSRTPSSRCState(ssrcState)
+		c.srtpSSRCStates[ssrcState.ssrc] = ssrcState
 	}
 
 	return dst, nil
@@ -154,6 +163,14 @@ func (c *Context) EncryptRTP(dst []byte, plaintext []byte, header *rtp.Header) (
 // Similar to above but faster because it can avoid unmarshaling the header and marshaling the payload.
 func (c *Context) encryptRTP(dst []byte, header *rtp.Header, headerLen int, plaintext []byte,
 ) (ciphertext []byte, err error) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	return c.encryptRTPLocked(dst, header, headerLen, plaintext)
+}
+
+func (c *Context) encryptRTPLocked(dst []byte, header *rtp.Header, headerLen int, plaintext []byte,
+) (ciphertext []byte, err error) {
 	// RFC 9335, section 5.1: This mechanism [Cryptex] MUST NOT be used with header extensions other than
 	// the variety described in [RFC8285].
 	if c.cryptexMode != CryptexModeDisabled && header.Extension &&
@@ -162,7 +179,7 @@ func (c *Context) encryptRTP(dst []byte, header *rtp.Header, headerLen int, plai
 		return nil, errUnsupportedHeaderExtension
 	}
 
-	ssrcState, _ := c.getSRTPSSRCState(header.SSRC, true)
+	ssrcState, _ := c.getSRTPSSRCStateLocked(header.SSRC, true)
 	roc, diff, ovf := ssrcState.nextRolloverCount(header.SequenceNumber)
 	if ovf {
 		// ... when 2^48 SRTP packets or 2^31 SRTCP packets have been secured with the same key

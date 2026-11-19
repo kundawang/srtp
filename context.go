@@ -6,6 +6,7 @@ package srtp
 import (
 	"bytes"
 	"fmt"
+	"sync"
 
 	"github.com/pion/transport/v5/replaydetector"
 )
@@ -87,6 +88,10 @@ const (
 // Note that Context does not provide any concurrency protection:
 // access to a Context from multiple goroutines requires external
 // synchronization.
+//
+// The exception is ExportReplayState, RestoreReplayState and
+// ClearReplayState: they synchronize with packet processing internally (and
+// with each other) so that a checkpoint is always consistent.
 type Context struct {
 	// constructed is set to true after the Context is fully initialized.
 	// Options can check this flag to reject updates that are only valid during construction.
@@ -97,8 +102,25 @@ type Context struct {
 	srtpSSRCStates  map[uint32]*srtpSSRCState
 	srtcpSSRCStates map[uint32]*srtcpSSRCState
 
+	// stateMu serializes replay-state checkpoints with packet processing.
+	stateMu sync.Mutex
+
 	newSRTCPReplayDetector func() replaydetector.ReplayDetector
 	newSRTPReplayDetector  func() replaydetector.ReplayDetector
+
+	// srtpReplayKind / srtcpReplayKind describe the configured detector.
+	// srtpReplayWindow / srtcpReplayWindow record the window size of the
+	// default detector and are meaningful only for replayKindDefault.
+	srtpReplayKind    replayKind
+	srtcpReplayKind   replayKind
+	srtpReplayWindow  uint
+	srtcpReplayWindow uint
+
+	// replayStateKeyID is a one-way fingerprint of the key and configuration,
+	// embedded in checkpoints to detect restores under mismatched settings.
+	replayStateKeyID [replayStateKeyIDLen]byte
+	// replayStateRestored is set once RestoreReplayState succeeded.
+	replayStateRestored bool
 
 	profile ProtectionProfile
 
@@ -174,6 +196,14 @@ func CreateContext(
 		c.mkis[string(c.sendMKI)] = c.cipher
 	}
 
+	c.replayStateKeyID = replayStateKeyID(
+		profile, masterKey, masterSalt,
+		c.encryptSRTP, c.encryptSRTCP,
+		c.rccMode, c.rocTransmitRate,
+		c.authTagRTPLen, c.cryptexMode,
+		c.sendMKI,
+	)
+
 	c.constructed = true
 
 	return c, nil
@@ -184,6 +214,10 @@ func (c *Context) contextWithKey(masterKey, masterSalt []byte, profile Protectio
 	return CreateContext(masterKey, masterSalt, profile, func(next *Context) error {
 		next.newSRTPReplayDetector = c.newSRTPReplayDetector
 		next.newSRTCPReplayDetector = c.newSRTCPReplayDetector
+		next.srtpReplayKind = c.srtpReplayKind
+		next.srtcpReplayKind = c.srtcpReplayKind
+		next.srtpReplayWindow = c.srtpReplayWindow
+		next.srtcpReplayWindow = c.srtcpReplayWindow
 		next.sendMKI = bytes.Clone(c.sendMKI)
 		next.encryptSRTP = c.encryptSRTP
 		next.encryptSRTCP = c.encryptSRTCP
@@ -339,17 +373,33 @@ func (s *srtpSSRCState) updateRolloverCount(sequenceNumber uint16, difference in
 	}
 }
 
-func (c *Context) getSRTPSSRCState(ssrc uint32, keepNew bool) (*srtpSSRCState, bool) {
+func (c *Context) newSRTPSSRCState(ssrc uint32) *srtpSSRCState {
+	state := &srtpSSRCState{
+		ssrc:           ssrc,
+		replayDetector: c.newSRTPReplayDetector(),
+	}
+	state.checkAccepter, _ = state.replayDetector.(replaydetector.CheckAccepter)
+
+	return state
+}
+
+func (c *Context) newSRTCPSSRCState(ssrc uint32) *srtcpSSRCState {
+	state := &srtcpSSRCState{
+		ssrc:           ssrc,
+		replayDetector: c.newSRTCPReplayDetector(),
+	}
+	state.checkAccepter, _ = state.replayDetector.(replaydetector.CheckAccepter)
+
+	return state
+}
+
+func (c *Context) getSRTPSSRCStateLocked(ssrc uint32, keepNew bool) (*srtpSSRCState, bool) {
 	state, ok := c.srtpSSRCStates[ssrc]
 	if ok {
 		return state, true
 	}
 
-	state = &srtpSSRCState{
-		ssrc:           ssrc,
-		replayDetector: c.newSRTPReplayDetector(),
-	}
-	state.checkAccepter, _ = state.replayDetector.(replaydetector.CheckAccepter)
+	state = c.newSRTPSSRCState(ssrc)
 	if keepNew {
 		c.srtpSSRCStates[ssrc] = state
 	}
@@ -357,17 +407,13 @@ func (c *Context) getSRTPSSRCState(ssrc uint32, keepNew bool) (*srtpSSRCState, b
 	return state, false
 }
 
-func (c *Context) getSRTCPSSRCState(ssrc uint32, keepNew bool) (*srtcpSSRCState, bool) {
+func (c *Context) getSRTCPSSRCStateLocked(ssrc uint32, keepNew bool) (*srtcpSSRCState, bool) {
 	state, ok := c.srtcpSSRCStates[ssrc]
 	if ok {
 		return state, true
 	}
 
-	state = &srtcpSSRCState{
-		ssrc:           ssrc,
-		replayDetector: c.newSRTCPReplayDetector(),
-	}
-	state.checkAccepter, _ = state.replayDetector.(replaydetector.CheckAccepter)
+	state = c.newSRTCPSSRCState(ssrc)
 	if keepNew {
 		c.srtcpSSRCStates[ssrc] = state
 	}
@@ -375,16 +421,11 @@ func (c *Context) getSRTCPSSRCState(ssrc uint32, keepNew bool) (*srtcpSSRCState,
 	return state, false
 }
 
-func (c *Context) setSRTPSSRCState(state *srtpSSRCState) {
-	c.srtpSSRCStates[state.ssrc] = state
-}
-
-func (c *Context) setSRTCPSSRCState(state *srtcpSSRCState) {
-	c.srtcpSSRCStates[state.ssrc] = state
-}
-
 // ROC returns SRTP rollover counter value of specified SSRC.
 func (c *Context) ROC(ssrc uint32) (uint32, bool) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
 	state, ok := c.srtpSSRCStates[ssrc]
 	if !ok {
 		return 0, false
@@ -395,13 +436,19 @@ func (c *Context) ROC(ssrc uint32) (uint32, bool) {
 
 // SetROC sets SRTP rollover counter value of specified SSRC.
 func (c *Context) SetROC(ssrc uint32, roc uint32) {
-	state, _ := c.getSRTPSSRCState(ssrc, true)
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	state, _ := c.getSRTPSSRCStateLocked(ssrc, true)
 	state.index = uint64(roc) << 16
 	state.rolloverHasProcessed = false
 }
 
 // Index returns SRTCP index value of specified SSRC.
 func (c *Context) Index(ssrc uint32) (uint32, bool) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
 	state, ok := c.srtcpSSRCStates[ssrc]
 	if !ok {
 		return 0, false
@@ -412,7 +459,10 @@ func (c *Context) Index(ssrc uint32) (uint32, bool) {
 
 // SetIndex sets SRTCP index value of specified SSRC.
 func (c *Context) SetIndex(ssrc uint32, index uint32) {
-	state, _ := c.getSRTCPSSRCState(ssrc, true)
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	state, _ := c.getSRTCPSSRCStateLocked(ssrc, true)
 	state.srtcpIndex = index % (maxSRTCPIndex + 1)
 }
 

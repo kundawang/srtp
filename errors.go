@@ -16,6 +16,24 @@ var (
 	// ErrContextOptionNotUpdatable indicates an option cannot be updated after construction.
 	ErrContextOptionNotUpdatable = errors.New("option can only be set during context construction")
 
+	// ErrReplayStateVersion indicates a checkpoint was produced by an unsupported format version.
+	ErrReplayStateVersion = errors.New("unsupported replay state version")
+	// ErrReplayStateCorrupted indicates a checkpoint is malformed or has been modified.
+	ErrReplayStateCorrupted = errors.New("replay state is corrupted")
+	// ErrReplayStateTruncated indicates a checkpoint ended before all declared data was read.
+	ErrReplayStateTruncated = errors.New("replay state is truncated")
+	// ErrReplayStateMismatch indicates a checkpoint does not belong to this Context's key,
+	// protection profile or replay configuration.
+	ErrReplayStateMismatch = errors.New("replay state does not match the context")
+	// ErrReplayStateCounterOverflow indicates a checkpoint holds a counter beyond its maximum.
+	ErrReplayStateCounterOverflow = errors.New("replay state counter overflow")
+	// ErrReplayStateUnsupported indicates the Context cannot export a checkpoint, e.g. because
+	// it uses a custom replay detector.
+	ErrReplayStateUnsupported = errors.New("replay state is not supported")
+	// ErrReplayStateAlreadyRestored indicates RestoreReplayState was called on a Context that
+	// already had replay state restored or had already processed packets.
+	ErrReplayStateAlreadyRestored = errors.New("replay state was already restored")
+
 	errDuplicated                    = errors.New("duplicated packet")
 	errShortSrtpMasterKey            = errors.New("SRTP master key is not long enough")
 	errShortSrtpMasterSalt           = errors.New("SRTP master salt is not long enough")

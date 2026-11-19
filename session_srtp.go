@@ -265,6 +265,34 @@ func (s *SessionSRTP) UpdateRemoteOptions(opts ...ContextOption) error {
 	return s.remoteContext.UpdateOptions(opts...)
 }
 
+// ExportReplayState returns a checkpoint of the remote (decrypting) Context's replay
+// state. It is safe to call concurrently with the session's read loop.
+func (s *SessionSRTP) ExportReplayState() ([]byte, error) {
+	s.session.remoteContextMutex.Lock()
+	defer s.session.remoteContextMutex.Unlock()
+
+	return s.remoteContext.ExportReplayState()
+}
+
+// RestoreReplayState restores the remote (decrypting) Context's replay state from a
+// checkpoint produced by ExportReplayState. It is safe to call concurrently with the
+// session's read loop.
+func (s *SessionSRTP) RestoreReplayState(checkpoint []byte) error {
+	s.session.remoteContextMutex.Lock()
+	defer s.session.remoteContextMutex.Unlock()
+
+	return s.remoteContext.RestoreReplayState(checkpoint)
+}
+
+// ClearReplayState drops the replay state of one SSRC from the remote (decrypting)
+// Context. It is safe to call concurrently with the session's read loop.
+func (s *SessionSRTP) ClearReplayState(ssrc uint32) {
+	s.session.remoteContextMutex.Lock()
+	defer s.session.remoteContextMutex.Unlock()
+
+	s.remoteContext.ClearReplayState(ssrc)
+}
+
 // UpdateKey resets packet state with fresh keys.
 func (s *SessionSRTP) UpdateKey(keys SessionKeys, profile ProtectionProfile) error {
 	return s.session.updateKey(keys, profile)

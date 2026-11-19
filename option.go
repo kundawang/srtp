@@ -16,6 +16,9 @@ import (
 type ContextOption func(*Context) error
 
 // SRTPReplayProtection sets SRTP replay protection window size.
+//
+// The detector configured by this option supports ExportReplayState and
+// RestoreReplayState.
 func SRTPReplayProtection(windowSize uint) ContextOption { // nolint:revive
 	return func(c *Context) error {
 		if c.constructed {
@@ -23,14 +26,19 @@ func SRTPReplayProtection(windowSize uint) ContextOption { // nolint:revive
 		}
 
 		c.newSRTPReplayDetector = func() replaydetector.ReplayDetector {
-			return replaydetector.New(windowSize, maxROC<<16|maxSequenceNumber)
+			return newReplayWindowDetector(windowSize, srtpMaxIndex)
 		}
+		c.srtpReplayKind = replayKindDefault
+		c.srtpReplayWindow = windowSize
 
 		return nil
 	}
 }
 
 // SRTCPReplayProtection sets SRTCP replay protection window size.
+//
+// The detector configured by this option supports ExportReplayState and
+// RestoreReplayState.
 func SRTCPReplayProtection(windowSize uint) ContextOption {
 	return func(c *Context) error {
 		if c.constructed {
@@ -38,8 +46,10 @@ func SRTCPReplayProtection(windowSize uint) ContextOption {
 		}
 
 		c.newSRTCPReplayDetector = func() replaydetector.ReplayDetector {
-			return replaydetector.New(windowSize, maxSRTCPIndex)
+			return newReplayWindowDetector(windowSize, srtcpMaxIndexConst)
 		}
+		c.srtcpReplayKind = replayKindDefault
+		c.srtcpReplayWindow = windowSize
 
 		return nil
 	}
@@ -55,6 +65,7 @@ func SRTPNoReplayProtection() ContextOption { // nolint:revive
 		c.newSRTPReplayDetector = func() replaydetector.ReplayDetector {
 			return &nopReplayDetector{}
 		}
+		c.srtpReplayKind = replayKindDisabled
 
 		return nil
 	}
@@ -70,6 +81,7 @@ func SRTCPNoReplayProtection() ContextOption {
 		c.newSRTCPReplayDetector = func() replaydetector.ReplayDetector {
 			return &nopReplayDetector{}
 		}
+		c.srtcpReplayKind = replayKindDisabled
 
 		return nil
 	}
@@ -83,6 +95,7 @@ func SRTPReplayDetectorFactory(fn func() replaydetector.ReplayDetector) ContextO
 		}
 
 		c.newSRTPReplayDetector = fn
+		c.srtpReplayKind = replayKindCustom
 
 		return nil
 	}
@@ -96,6 +109,7 @@ func SRTCPReplayDetectorFactory(fn func() replaydetector.ReplayDetector) Context
 		}
 
 		c.newSRTCPReplayDetector = fn
+		c.srtcpReplayKind = replayKindCustom
 
 		return nil
 	}

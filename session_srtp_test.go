@@ -1202,3 +1202,194 @@ func keyTestKeys(t *testing.T, profile ProtectionProfile) SessionKeys {
 		RemoteMasterSalt: bytes.Repeat([]byte{2}, saltLen),
 	}
 }
+
+// buildSessionSRTPPairWithMKI creates a session pair whose local and remote contexts
+// have MKI support enabled with mki as the initial send MKI.
+func buildSessionSRTPPairWithMKI(t *testing.T, mki []byte) (*SessionSRTP, *SessionSRTP) {
+	t.Helper()
+
+	config := &Config{
+		Profile: ProtectionProfileAes128CmHmacSha1_80,
+		Keys: SessionKeys{
+			LocalMasterKey:   []byte{0xE1, 0xF9, 0x7A, 0x0D, 0x3E, 0x01, 0x8B, 0xE0, 0xD6, 0x4F, 0xA3, 0x2C, 0x06, 0xDE, 0x41, 0x39},
+			LocalMasterSalt:  []byte{0x0E, 0xC6, 0x75, 0xAD, 0x49, 0x8A, 0xFE, 0xEB, 0xB6, 0x96, 0x0B, 0x3A, 0xAB, 0xE6},
+			RemoteMasterKey:  []byte{0xE1, 0xF9, 0x7A, 0x0D, 0x3E, 0x01, 0x8B, 0xE0, 0xD6, 0x4F, 0xA3, 0x2C, 0x06, 0xDE, 0x41, 0x39},
+			RemoteMasterSalt: []byte{0x0E, 0xC6, 0x75, 0xAD, 0x49, 0x8A, 0xFE, 0xEB, 0xB6, 0x96, 0x0B, 0x3A, 0xAB, 0xE6},
+		},
+		LocalOptions:  []ContextOption{MasterKeyIndicator(mki)},
+		RemoteOptions: []ContextOption{MasterKeyIndicator(mki)},
+	}
+
+	aPipe, bPipe := net.Pipe()
+	aSession, err := NewSessionSRTP(aPipe, config)
+	require.NoError(t, err)
+	bSession, err := NewSessionSRTP(bPipe, config)
+	require.NoError(t, err)
+
+	return aSession, bSession
+}
+
+// TestSessionSRTPSetSendMKIForSSRC exercises the session-level per-SSRC send MKI API:
+// two streams of one session are sent with different MKIs at the same time, an MKI in
+// use cannot be removed, and calls after Close report errSessionClosed.
+func TestSessionSRTPSetSendMKIForSSRC(t *testing.T) { //nolint:cyclop
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	mki1 := []byte{1, 2, 3, 4}
+	mki2 := []byte{2, 3, 4, 5}
+	masterKey2 := bytes.Repeat([]byte{0x42}, 16)
+	masterSalt2 := bytes.Repeat([]byte{0x24}, 14)
+
+	const (
+		ssrcMain    = 5000
+		ssrcPreview = 5001
+	)
+
+	aSession, bSession := buildSessionSRTPPairWithMKI(t, mki1)
+
+	// The session API manages the local (encrypting) context, so register the second
+	// MKI on b's remote (decrypting) context directly.
+	bSession.remoteContextMutex.Lock()
+	require.NoError(t, bSession.remoteContext.AddCipherForMKI(mki2, masterKey2, masterSalt2))
+	bSession.remoteContextMutex.Unlock()
+
+	require.NoError(t, aSession.AddCipherForMKI(mki2, masterKey2, masterSalt2))
+
+	// Unknown MKIs are rejected.
+	assert.ErrorIs(t, aSession.SetSendMKIForSSRC(ssrcMain, []byte{9, 9, 9, 9}), ErrMKINotFound)
+
+	// An MKI selected for a stream cannot be removed.
+	require.NoError(t, aSession.SetSendMKIForSSRC(ssrcPreview, mki2))
+	assert.ErrorIs(t, aSession.RemoveMKI(mki2), errMKIAlreadyInUse)
+
+	aWriteStream, err := aSession.OpenWriteStream()
+	require.NoError(t, err)
+	bReadMain, err := bSession.OpenReadStream(ssrcMain)
+	require.NoError(t, err)
+	bReadPreview, err := bSession.OpenReadStream(ssrcPreview)
+	require.NoError(t, err)
+
+	writePacket := func(ssrc uint32, sequenceNumber uint16, payload byte) {
+		t.Helper()
+		_, werr := aWriteStream.WriteRTP(&rtp.Header{
+			Version: 2, SSRC: ssrc, SequenceNumber: sequenceNumber, PayloadType: 96,
+		}, []byte{payload})
+		require.NoError(t, werr)
+	}
+	readPacket := func(stream *ReadStreamSRTP, payload byte) {
+		t.Helper()
+		buf := make([]byte, 1500)
+		n, rerr := stream.Read(buf)
+		require.NoError(t, rerr)
+		pkt := &rtp.Packet{}
+		require.NoError(t, pkt.Unmarshal(buf[:n]))
+		assert.Equal(t, []byte{payload}, pkt.Payload)
+	}
+
+	// The main stream uses the default MKI while the preview stream uses its own.
+	writePacket(ssrcMain, 1, 0x0A)
+	writePacket(ssrcPreview, 1, 0x0B)
+	readPacket(bReadMain, 0x0A)
+	readPacket(bReadPreview, 0x0B)
+
+	// Reverting the preview stream to the default MKI allows removing the old MKI;
+	// a removed MKI can no longer be selected.
+	require.NoError(t, aSession.ClearSendMKIForSSRC(ssrcPreview))
+	require.NoError(t, aSession.RemoveMKI(mki2))
+	assert.ErrorIs(t, aSession.SetSendMKIForSSRC(ssrcPreview, mki2), ErrMKINotFound)
+
+	writePacket(ssrcMain, 2, 0x0C)
+	writePacket(ssrcPreview, 2, 0x0D)
+	readPacket(bReadMain, 0x0C)
+	readPacket(bReadPreview, 0x0D)
+
+	require.NoError(t, aSession.Close())
+	require.NoError(t, bSession.Close())
+
+	// Calls after Close report a defined error.
+	assert.ErrorIs(t, aSession.SetSendMKIForSSRC(ssrcMain, mki1), errSessionClosed)
+	assert.ErrorIs(t, aSession.ClearSendMKIForSSRC(ssrcMain), errSessionClosed)
+	assert.ErrorIs(t, aSession.AddCipherForMKI(mki2, masterKey2, masterSalt2), errSessionClosed)
+	assert.ErrorIs(t, aSession.RemoveMKI(mki1), errSessionClosed)
+}
+
+// TestSessionSRTPPerSSRCMKIConcurrent switches per-SSRC send MKIs while packets of
+// both streams are in flight; it is meant to be run with the race detector.
+func TestSessionSRTPPerSSRCMKIConcurrent(t *testing.T) {
+	lim := test.TimeOut(30 * time.Second)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	mki1 := []byte{1, 2, 3, 4}
+	mki2 := []byte{2, 3, 4, 5}
+	masterKey2 := bytes.Repeat([]byte{0x42}, 16)
+	masterSalt2 := bytes.Repeat([]byte{0x24}, 14)
+
+	aSession, bSession := buildSessionSRTPPairWithMKI(t, mki1)
+
+	bSession.remoteContextMutex.Lock()
+	require.NoError(t, bSession.remoteContext.AddCipherForMKI(mki2, masterKey2, masterSalt2))
+	bSession.remoteContextMutex.Unlock()
+
+	require.NoError(t, aSession.AddCipherForMKI(mki2, masterKey2, masterSalt2))
+
+	aWriteStream, err := aSession.OpenWriteStream()
+	require.NoError(t, err)
+
+	// Pre-register the read streams so the read loop does not block on AcceptStream.
+	for _, ssrc := range []uint32{6000, 6001} {
+		_, err = bSession.OpenReadStream(ssrc)
+		require.NoError(t, err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 3)
+	for _, ssrc := range []uint32{6000, 6001} {
+		wg.Add(1)
+		go func(ssrc uint32) {
+			defer wg.Done()
+			for seq := uint16(1); seq <= 200; seq++ {
+				_, werr := aWriteStream.WriteRTP(&rtp.Header{
+					Version: 2, SSRC: ssrc, SequenceNumber: seq, PayloadType: 96,
+				}, []byte{0x01})
+				if werr != nil {
+					errs <- werr
+
+					return
+				}
+			}
+		}(ssrc)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			for _, op := range []func() error{
+				func() error { return aSession.SetSendMKIForSSRC(6000, mki2) },
+				func() error { return aSession.SetSendMKIForSSRC(6001, mki2) },
+				func() error { return aSession.ClearSendMKIForSSRC(6000) },
+				func() error { return aSession.ClearSendMKIForSSRC(6001) },
+			} {
+				if err := op(); err != nil {
+					errs <- err
+
+					return
+				}
+			}
+		}
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, aSession.Close())
+	require.NoError(t, bSession.Close())
+}

@@ -40,6 +40,7 @@ var (
 	errStreamAlreadyClosed = errors.New("stream is already closed")
 	errStreamAlreadyInited = errors.New("stream is already inited")
 	errFailedTypeAssertion = errors.New("failed to cast child")
+	errSessionClosed       = errors.New("session is already closed")
 
 	errZeroRocTransmitRate = errors.New("ROC transmit rate is zero")
 	errUnsupportedRccMode  = errors.New("unsupported RCC mode")

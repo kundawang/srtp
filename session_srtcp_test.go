@@ -933,3 +933,90 @@ func errIsTimeout(err error) bool {
 
 	return false
 }
+
+// TestSessionSRTCPSetSendMKIForSSRC exercises the session-level per-SSRC send MKI API
+// for RTCP: one stream is sent with its own MKI while the other keeps the default,
+// and calls after Close report errSessionClosed.
+func TestSessionSRTCPSetSendMKIForSSRC(t *testing.T) {
+	lim := test.TimeOut(10 * time.Second)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	mki1 := []byte{1, 2, 3, 4}
+	mki2 := []byte{2, 3, 4, 5}
+	masterKey2 := []byte{0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42}
+	masterSalt2 := []byte{0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24}
+
+	const (
+		ssrcMain    = 5000
+		ssrcPreview = 5001
+	)
+
+	config := &Config{
+		Profile: ProtectionProfileAes128CmHmacSha1_80,
+		Keys: SessionKeys{
+			LocalMasterKey:   []byte{0xE1, 0xF9, 0x7A, 0x0D, 0x3E, 0x01, 0x8B, 0xE0, 0xD6, 0x4F, 0xA3, 0x2C, 0x06, 0xDE, 0x41, 0x39},
+			LocalMasterSalt:  []byte{0x0E, 0xC6, 0x75, 0xAD, 0x49, 0x8A, 0xFE, 0xEB, 0xB6, 0x96, 0x0B, 0x3A, 0xAB, 0xE6},
+			RemoteMasterKey:  []byte{0xE1, 0xF9, 0x7A, 0x0D, 0x3E, 0x01, 0x8B, 0xE0, 0xD6, 0x4F, 0xA3, 0x2C, 0x06, 0xDE, 0x41, 0x39},
+			RemoteMasterSalt: []byte{0x0E, 0xC6, 0x75, 0xAD, 0x49, 0x8A, 0xFE, 0xEB, 0xB6, 0x96, 0x0B, 0x3A, 0xAB, 0xE6},
+		},
+		LocalOptions:  []ContextOption{MasterKeyIndicator(mki1)},
+		RemoteOptions: []ContextOption{MasterKeyIndicator(mki1)},
+	}
+
+	aPipe, bPipe := net.Pipe()
+	aSession, err := NewSessionSRTCP(aPipe, config)
+	assert.NoError(t, err)
+	bSession, err := NewSessionSRTCP(bPipe, config)
+	assert.NoError(t, err)
+
+	// The session API manages the local (encrypting) context, so register the second
+	// MKI on b's remote (decrypting) context directly.
+	bSession.remoteContextMutex.Lock()
+	assert.NoError(t, bSession.remoteContext.AddCipherForMKI(mki2, masterKey2, masterSalt2))
+	bSession.remoteContextMutex.Unlock()
+
+	assert.NoError(t, aSession.AddCipherForMKI(mki2, masterKey2, masterSalt2))
+	assert.ErrorIs(t, aSession.SetSendMKIForSSRC(ssrcMain, []byte{9, 9, 9, 9}), ErrMKINotFound)
+	assert.NoError(t, aSession.SetSendMKIForSSRC(ssrcPreview, mki2))
+	assert.ErrorIs(t, aSession.RemoveMKI(mki2), errMKIAlreadyInUse)
+
+	aWriteStream, err := aSession.OpenWriteStream()
+	assert.NoError(t, err)
+	bReadMain, err := bSession.OpenReadStream(ssrcMain)
+	assert.NoError(t, err)
+	bReadPreview, err := bSession.OpenReadStream(ssrcPreview)
+	assert.NoError(t, err)
+
+	mainReport, err := rtcp.Marshal([]rtcp.Packet{&rtcp.SenderReport{SSRC: ssrcMain, RTPTime: 1, PacketCount: 2}})
+	assert.NoError(t, err)
+	previewReport, err := rtcp.Marshal([]rtcp.Packet{&rtcp.SenderReport{SSRC: ssrcPreview, RTPTime: 3, PacketCount: 4}})
+	assert.NoError(t, err)
+
+	_, err = aWriteStream.Write(mainReport)
+	assert.NoError(t, err)
+	_, err = aWriteStream.Write(previewReport)
+	assert.NoError(t, err)
+
+	buf := make([]byte, 1500)
+	n, err := bReadMain.Read(buf)
+	assert.NoError(t, err)
+	assert.Equal(t, mainReport, buf[:n])
+	n, err = bReadPreview.Read(buf)
+	assert.NoError(t, err)
+	assert.Equal(t, previewReport, buf[:n])
+
+	assert.NoError(t, aSession.ClearSendMKIForSSRC(ssrcPreview))
+	assert.NoError(t, aSession.RemoveMKI(mki2))
+
+	assert.NoError(t, aSession.Close())
+	assert.NoError(t, bSession.Close())
+
+	// Calls after Close report a defined error.
+	assert.ErrorIs(t, aSession.SetSendMKIForSSRC(ssrcMain, mki1), errSessionClosed)
+	assert.ErrorIs(t, aSession.ClearSendMKIForSSRC(ssrcMain), errSessionClosed)
+	assert.ErrorIs(t, aSession.AddCipherForMKI(mki2, masterKey2, masterSalt2), errSessionClosed)
+	assert.ErrorIs(t, aSession.RemoveMKI(mki1), errSessionClosed)
+}

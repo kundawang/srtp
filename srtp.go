@@ -175,7 +175,7 @@ func (c *Context) encryptRTP(dst []byte, header *rtp.Header, headerLen int, plai
 
 	rocInPacket := c.rccMode != RCCModeNone && header.SequenceNumber%c.rocTransmitRate == 0
 
-	return c.cipher.encryptRTP(dst, header, headerLen, plaintext, roc, rocInPacket)
+	return c.sendCipherForSSRC(header.SSRC).encryptRTP(dst, header, headerLen, plaintext, roc, rocInPacket)
 }
 
 func (c *Context) hasROCInPacket(header *rtp.Header, authTagLen int) (bool, int) {

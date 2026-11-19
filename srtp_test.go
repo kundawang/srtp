@@ -4,6 +4,7 @@
 package srtp
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/pion/rtp"
@@ -946,6 +947,96 @@ func TestRTPSwitchMKI(t *testing.T) { //nolint:cyclop
 
 		err = encryptContext.SetSendMKI(mki1)
 		assert.NoError(t, err)
+	}
+}
+
+// TestRTPSwitchMKIPerSSRC verifies that two SSRCs of one encrypting Context can switch
+// send MKIs independently at different sequence numbers: each fixed packet carries the
+// expected MKI at its tail, streams never use each other's key, and every packet still
+// decrypts with the matching receive cipher.
+func TestRTPSwitchMKIPerSSRC(t *testing.T) { //nolint:cyclop
+	mki1 := []byte{0x01, 0x02, 0x03, 0x04}
+	mki2 := []byte{0x02, 0x03, 0x04, 0x05}
+
+	const (
+		ssrcMain    = 0xAAAA0001
+		ssrcPreview = 0xBBBB0002
+		ssrcOther   = 0xCCCC0003
+	)
+
+	for name, profile := range map[string]ProtectionProfile{"CTR": profileCTR, "GCM": profileGCM} {
+		t.Run(name, func(t *testing.T) {
+			keyLen, err := profile.KeyLen()
+			assert.NoError(t, err)
+			saltLen, err := profile.SaltLen()
+			assert.NoError(t, err)
+
+			masterKey2 := bytes.Repeat([]byte{0xff}, keyLen)
+			masterSalt2 := bytes.Repeat([]byte{0xee}, saltLen)
+
+			encryptContext, err := buildTestContext(profile, MasterKeyIndicator(mki1))
+			assert.NoError(t, err)
+			assert.NoError(t, encryptContext.AddCipherForMKI(mki2, masterKey2, masterSalt2))
+
+			decryptContext, err := buildTestContext(profile, MasterKeyIndicator(mki1))
+			assert.NoError(t, err)
+			assert.NoError(t, decryptContext.AddCipherForMKI(mki2, masterKey2, masterSalt2))
+
+			authTagLen, err := encryptContext.cipher.AuthTagRTPLen()
+			assert.NoError(t, err)
+
+			// encryptAndAssert encrypts one fixed packet, checks that the expected MKI
+			// was appended to the packet tail (before the auth tag, if any), and that
+			// the packet decrypts back to the original.
+			encryptAndAssert := func(ssrc uint32, sequenceNumber uint16, expectedMKI []byte) {
+				t.Helper()
+
+				pkt := &rtp.Packet{
+					Header: rtp.Header{
+						Version:        2,
+						SSRC:           ssrc,
+						SequenceNumber: sequenceNumber,
+						PayloadType:    96,
+					},
+					Payload: rtpTestCaseDecrypted(),
+				}
+				pktRaw, err := pkt.Marshal()
+				assert.NoError(t, err)
+
+				encrypted, err := encryptContext.EncryptRTP(nil, pktRaw, nil)
+				assert.NoError(t, err)
+
+				mki := encrypted[len(encrypted)-authTagLen-len(expectedMKI) : len(encrypted)-authTagLen]
+				assert.Equal(t, expectedMKI, mki, "unexpected MKI for SSRC=%d Seq=%d", ssrc, sequenceNumber)
+
+				decrypted, err := decryptContext.DecryptRTP(nil, encrypted, nil)
+				assert.NoError(t, err)
+				assert.Equal(t, pktRaw, decrypted)
+			}
+
+			// Both streams start on the default send MKI.
+			encryptAndAssert(ssrcMain, 100, mki1)
+			encryptAndAssert(ssrcPreview, 7, mki1)
+
+			// The main stream switches first; the preview stream is unaffected.
+			assert.NoError(t, encryptContext.SetSendMKIForSSRC(ssrcMain, mki2))
+			encryptAndAssert(ssrcMain, 101, mki2)
+			encryptAndAssert(ssrcPreview, 8, mki1)
+			encryptAndAssert(ssrcMain, 102, mki2)
+
+			// The preview stream switches at its own sequence number.
+			assert.NoError(t, encryptContext.SetSendMKIForSSRC(ssrcPreview, mki2))
+			encryptAndAssert(ssrcPreview, 9, mki2)
+			encryptAndAssert(ssrcMain, 103, mki2)
+
+			// SSRCs without a selection keep using the default send MKI.
+			encryptAndAssert(ssrcOther, 1, mki1)
+
+			// Clearing the selection reverts the stream to the default send MKI.
+			encryptContext.ClearSendMKIForSSRC(ssrcMain)
+			encryptAndAssert(ssrcMain, 104, mki1)
+			encryptAndAssert(ssrcPreview, 10, mki2)
+		})
 	}
 }
 

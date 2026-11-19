@@ -134,7 +134,7 @@ func (c *Context) encryptRTCP(dst, decrypted []byte) ([]byte, error) {
 	// We roll over early because MSB is used for marking as encrypted
 	ssrcState.srtcpIndex++
 
-	return c.cipher.encryptRTCP(dst, decrypted, ssrcState.srtcpIndex, ssrc)
+	return c.sendCipherForSSRC(ssrc).encryptRTCP(dst, decrypted, ssrcState.srtcpIndex, ssrc)
 }
 
 // EncryptRTCP Encrypts a RTCP packet.

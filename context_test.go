@@ -143,6 +143,43 @@ func TestContextRemoveMKI(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestContextSetSendMKIForSSRC(t *testing.T) {
+	mki1 := []byte{1, 2, 3, 4}
+	mki2 := []byte{2, 3, 4, 5}
+	mki3 := []byte{3, 4, 5, 6}
+
+	// Without MKI enabled, per-SSRC selection is rejected.
+	ctxNoMKI, err := CreateContext(make([]byte, 16), make([]byte, 14), profileCTR)
+	assert.NoError(t, err)
+	assert.ErrorIs(t, ctxNoMKI.SetSendMKIForSSRC(1, mki1), errMKIIsNotEnabled)
+
+	ctx, err := CreateContext(make([]byte, 16), make([]byte, 14), profileCTR, MasterKeyIndicator(mki1))
+	assert.NoError(t, err)
+	assert.NoError(t, ctx.AddCipherForMKI(mki2, make([]byte, 16), make([]byte, 14)))
+
+	// Unknown and empty MKIs are rejected.
+	assert.ErrorIs(t, ctx.SetSendMKIForSSRC(1, mki3), ErrMKINotFound)
+	assert.ErrorIs(t, ctx.SetSendMKIForSSRC(1, nil), ErrMKINotFound)
+
+	// The SSRC does not need to exist beforehand, and re-selecting (SSRC reuse)
+	// replaces the previous mapping.
+	assert.NoError(t, ctx.SetSendMKIForSSRC(100, mki2))
+	assert.NoError(t, ctx.SetSendMKIForSSRC(100, mki1))
+
+	// An MKI selected for an SSRC cannot be removed.
+	assert.NoError(t, ctx.SetSendMKIForSSRC(200, mki2))
+	assert.ErrorIs(t, ctx.RemoveMKI(mki2), errMKIAlreadyInUse)
+
+	// After clearing the selection the MKI can be removed, and a removed MKI
+	// can no longer be selected.
+	ctx.ClearSendMKIForSSRC(200)
+	assert.NoError(t, ctx.RemoveMKI(mki2))
+	assert.ErrorIs(t, ctx.SetSendMKIForSSRC(300, mki2), ErrMKINotFound)
+
+	// Clearing an SSRC without a selection is a no-op.
+	ctx.ClearSendMKIForSSRC(404)
+}
+
 func TestInvalidContextOptions(t *testing.T) {
 	profiles := []ProtectionProfile{
 		ProtectionProfileAes128CmHmacSha1_80,

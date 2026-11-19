@@ -266,6 +266,44 @@ func (s *SessionSRTP) UpdateRemoteOptions(opts ...ContextOption) error {
 }
 
 // UpdateKey resets packet state with fresh keys.
+// Per-SSRC send MKI selections made with SetSendMKIForSSRC are not retained.
 func (s *SessionSRTP) UpdateKey(keys SessionKeys, profile ProtectionProfile) error {
 	return s.session.updateKey(keys, profile)
+}
+
+// AddCipherForMKI registers a new MKI with associated master key and salt on the local
+// (encrypting) Context, so it can be selected for sending with SetSendMKIForSSRC.
+// The session must have been created with the MasterKeyIndicator option.
+// Unlike Context.AddCipherForMKI, this is safe to call concurrently with writes.
+// It returns errSessionClosed after the session has been closed.
+func (s *SessionSRTP) AddCipherForMKI(mki, masterKey, masterSalt []byte) error {
+	return s.session.addCipherForMKI(mki, masterKey, masterSalt)
+}
+
+// RemoveMKI removes an MKI from the local (encrypting) Context. It fails if the MKI is
+// the default send MKI or is still selected for any SSRC with SetSendMKIForSSRC.
+// Unlike Context.RemoveMKI, this is safe to call concurrently with writes.
+// It returns errSessionClosed after the session has been closed.
+func (s *SessionSRTP) RemoveMKI(mki []byte) error {
+	return s.session.removeMKI(mki)
+}
+
+// SetSendMKIForSSRC selects the MKI used for encrypting RTP packets of the given SSRC,
+// overriding the default send MKI for that stream only. Streams without a selection
+// keep using the default send MKI, so the send keys of individual streams of this
+// session can be rotated independently and at different times. The MKI must have been
+// registered with the MasterKeyIndicator option or AddCipherForMKI.
+// Unlike Context.SetSendMKIForSSRC, this is safe to call concurrently with writes.
+// It returns errSessionClosed after the session has been closed.
+func (s *SessionSRTP) SetSendMKIForSSRC(ssrc uint32, mki []byte) error {
+	return s.session.setSendMKIForSSRC(ssrc, mki)
+}
+
+// ClearSendMKIForSSRC removes the per-SSRC send MKI selection, so RTP packets of the
+// SSRC are encrypted with the default send MKI again. It is a no-op if no selection
+// was made for the SSRC.
+// Unlike Context.ClearSendMKIForSSRC, this is safe to call concurrently with writes.
+// It returns errSessionClosed after the session has been closed.
+func (s *SessionSRTP) ClearSendMKIForSSRC(ssrc uint32) error {
+	return s.session.clearSendMKIForSSRC(ssrc)
 }

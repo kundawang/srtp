@@ -107,6 +107,10 @@ type Context struct {
 	// Master Key Identifier to cipher mapping. Used for decrypting packets. Empty if MKI is not enabled.
 	mkis map[string]srtpCipher
 
+	// Per-SSRC send cipher overrides set by SetSendMKIForSSRC. SSRCs without an
+	// entry are encrypted with cipher (the default send MKI).
+	sendCipherBySSRC map[uint32]srtpCipher
+
 	encryptSRTP  bool
 	encryptSRTCP bool
 
@@ -258,14 +262,23 @@ func (c *Context) createCipher(mki, masterKey, masterSalt []byte, encryptSRTP, e
 	}
 }
 
-// RemoveMKI removes one of MKIs. You cannot remove last MKI and one used for encrypting RTP/RTCP packets.
+// RemoveMKI removes one of MKIs. You cannot remove last MKI and one used for encrypting
+// RTP/RTCP packets, either as the default send MKI or as the per-SSRC send MKI selected
+// with SetSendMKIForSSRC. Call ClearSendMKIForSSRC (or select another MKI for the SSRC)
+// before removing an MKI that is still selected for a stream.
 // Operation is not thread-safe, you need to provide synchronization with decrypting packets.
 func (c *Context) RemoveMKI(mki []byte) error {
-	if _, ok := c.mkis[string(mki)]; !ok {
+	cipher, ok := c.mkis[string(mki)]
+	if !ok {
 		return ErrMKINotFound
 	}
 	if bytes.Equal(mki, c.sendMKI) {
 		return errMKIAlreadyInUse
+	}
+	for _, sendCipher := range c.sendCipherBySSRC {
+		if sendCipher == cipher {
+			return errMKIAlreadyInUse
+		}
 	}
 	delete(c.mkis, string(mki))
 
@@ -283,6 +296,53 @@ func (c *Context) SetSendMKI(mki []byte) error {
 	c.cipher = cipher
 
 	return nil
+}
+
+// SetSendMKIForSSRC selects the MKI (and its associated cipher) used for encrypting RTP
+// and RTCP packets of the given SSRC, overriding the default send MKI for that stream
+// only. Streams without a selection keep using the MKI set by SetSendMKI, so the send
+// keys of individual streams of one session can be rotated independently and at
+// different times.
+//
+// The MKI must have been registered with the MasterKeyIndicator option or
+// AddCipherForMKI. The SSRC does not need to have been seen before: the selection is
+// bound to the SSRC itself, not to any per-stream state, so it stays in effect
+// (including across SSRC reuse) until ClearSendMKIForSSRC is called. Selections are
+// not retained when the Context is re-created, e.g. by Session.UpdateKey.
+//
+// Operation is not thread-safe, you need to provide synchronization with encrypting packets.
+func (c *Context) SetSendMKIForSSRC(ssrc uint32, mki []byte) error {
+	if len(c.mkis) == 0 {
+		return errMKIIsNotEnabled
+	}
+	cipher, ok := c.mkis[string(mki)]
+	if !ok {
+		return ErrMKINotFound
+	}
+	if c.sendCipherBySSRC == nil {
+		c.sendCipherBySSRC = map[uint32]srtpCipher{}
+	}
+	c.sendCipherBySSRC[ssrc] = cipher
+
+	return nil
+}
+
+// ClearSendMKIForSSRC removes the per-SSRC send MKI selection made by
+// SetSendMKIForSSRC, so packets of the SSRC are encrypted with the default send MKI
+// again. It is a no-op if no selection was made for the SSRC.
+// Operation is not thread-safe, you need to provide synchronization with encrypting packets.
+func (c *Context) ClearSendMKIForSSRC(ssrc uint32) {
+	delete(c.sendCipherBySSRC, ssrc)
+}
+
+// sendCipherForSSRC returns the cipher used for encrypting packets of the given SSRC:
+// the one selected by SetSendMKIForSSRC if present, or the default send cipher.
+func (c *Context) sendCipherForSSRC(ssrc uint32) srtpCipher {
+	if cipher, ok := c.sendCipherBySSRC[ssrc]; ok {
+		return cipher
+	}
+
+	return c.cipher
 }
 
 // https://tools.ietf.org/html/rfc3550#appendix-A.1

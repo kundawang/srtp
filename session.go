@@ -194,3 +194,59 @@ func (s *session) updateKey(keys SessionKeys, profile ProtectionProfile) error {
 
 	return nil
 }
+
+// isClosed reports whether the session has been closed.
+func (s *session) isClosed() bool {
+	select {
+	case <-s.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+// The helpers below wrap the corresponding methods of the local (encrypting) Context
+// with the session lock, so they are safe to call concurrently with packet writes.
+// After the session has been closed they report errSessionClosed.
+
+func (s *session) addCipherForMKI(mki, masterKey, masterSalt []byte) error {
+	if s.isClosed() {
+		return errSessionClosed
+	}
+	s.localContextMutex.Lock()
+	defer s.localContextMutex.Unlock()
+
+	return s.localContext.AddCipherForMKI(mki, masterKey, masterSalt)
+}
+
+func (s *session) removeMKI(mki []byte) error {
+	if s.isClosed() {
+		return errSessionClosed
+	}
+	s.localContextMutex.Lock()
+	defer s.localContextMutex.Unlock()
+
+	return s.localContext.RemoveMKI(mki)
+}
+
+func (s *session) setSendMKIForSSRC(ssrc uint32, mki []byte) error {
+	if s.isClosed() {
+		return errSessionClosed
+	}
+	s.localContextMutex.Lock()
+	defer s.localContextMutex.Unlock()
+
+	return s.localContext.SetSendMKIForSSRC(ssrc, mki)
+}
+
+func (s *session) clearSendMKIForSSRC(ssrc uint32) error {
+	if s.isClosed() {
+		return errSessionClosed
+	}
+	s.localContextMutex.Lock()
+	defer s.localContextMutex.Unlock()
+
+	s.localContext.ClearSendMKIForSSRC(ssrc)
+
+	return nil
+}

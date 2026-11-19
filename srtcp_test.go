@@ -757,3 +757,75 @@ func TestSRTCPFailedAuthDoesNotGrowSSRCMap(t *testing.T) {
 	t.Run("CTR", func(t *testing.T) { testSRTCPFailedAuthDoesNotGrowSSRCMap(t, profileCTR) })
 	t.Run("GCM", func(t *testing.T) { testSRTCPFailedAuthDoesNotGrowSSRCMap(t, profileGCM) })
 }
+
+// TestRTCPSwitchMKIPerSSRC verifies that two SSRCs of one encrypting Context can use
+// different send MKIs for SRTCP at the same time: each packet carries the expected MKI
+// at its tail (before the auth tag, if any) and still decrypts with the matching
+// receive cipher.
+func TestRTCPSwitchMKIPerSSRC(t *testing.T) { //nolint:cyclop
+	mki1 := []byte{0x01, 0x02, 0x03, 0x04}
+	mki2 := []byte{0x02, 0x03, 0x04, 0x05}
+
+	const (
+		ssrcMain    = 0xAAAA0001
+		ssrcPreview = 0xBBBB0002
+	)
+
+	for caseName, testCase := range rtcpTestCases() {
+		t.Run(caseName, func(t *testing.T) {
+			masterKey2 := make([]byte, len(testCase.masterKey))
+			copy(masterKey2, testCase.masterKey)
+			masterKey2[0] = ^masterKey2[0]
+
+			encryptContext, err := CreateContext(
+				testCase.masterKey, testCase.masterSalt, testCase.algo, MasterKeyIndicator(mki1),
+			)
+			assert.NoError(t, err)
+			assert.NoError(t, encryptContext.AddCipherForMKI(mki2, masterKey2, testCase.masterSalt))
+
+			decryptContext, err := CreateContext(
+				testCase.masterKey, testCase.masterSalt, testCase.algo, MasterKeyIndicator(mki1),
+			)
+			assert.NoError(t, err)
+			assert.NoError(t, decryptContext.AddCipherForMKI(mki2, masterKey2, testCase.masterSalt))
+
+			authTagLen, err := encryptContext.cipher.AuthTagRTCPLen()
+			assert.NoError(t, err)
+
+			encryptAndAssert := func(ssrc uint32, expectedMKI []byte) {
+				t.Helper()
+
+				raw, err := (&rtcp.SenderReport{SSRC: ssrc, RTPTime: 1, PacketCount: 2}).Marshal()
+				assert.NoError(t, err)
+
+				encrypted, err := encryptContext.EncryptRTCP(nil, raw, nil)
+				assert.NoError(t, err)
+
+				mki := encrypted[len(encrypted)-authTagLen-len(mki1) : len(encrypted)-authTagLen]
+				assert.Equal(t, expectedMKI, mki, "unexpected MKI for SSRC=%d", ssrc)
+
+				decrypted, err := decryptContext.DecryptRTCP(nil, encrypted, nil)
+				assert.NoError(t, err)
+				assert.Equal(t, raw, decrypted)
+			}
+
+			// Both streams start on the default send MKI.
+			encryptAndAssert(ssrcMain, mki1)
+			encryptAndAssert(ssrcPreview, mki1)
+
+			// The main stream switches first; the preview stream is unaffected.
+			assert.NoError(t, encryptContext.SetSendMKIForSSRC(ssrcMain, mki2))
+			encryptAndAssert(ssrcMain, mki2)
+			encryptAndAssert(ssrcPreview, mki1)
+
+			// The preview stream switches independently.
+			assert.NoError(t, encryptContext.SetSendMKIForSSRC(ssrcPreview, mki2))
+			encryptAndAssert(ssrcMain, mki2)
+			encryptAndAssert(ssrcPreview, mki2)
+
+			// Clearing the selection reverts the stream to the default send MKI.
+			encryptContext.ClearSendMKIForSSRC(ssrcMain)
+			encryptAndAssert(ssrcMain, mki1)
+		})
+	}
+}

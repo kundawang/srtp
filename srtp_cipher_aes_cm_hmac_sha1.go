@@ -32,6 +32,12 @@ type srtpCipherAesCmHmacSha1 struct {
 
 	useCryptex bool
 
+	// RFC 6904 selective header extension encryption. These are only set when at least one
+	// extension ID is configured; an empty encryptedHeaderExtensionIDs disables the feature.
+	headerSessionSalt           []byte
+	headerEncryptionBlock       cipher.Block
+	encryptedHeaderExtensionIDs []uint8
+
 	// Pre-allocated buffers for auth tag to avoid heap allocation in hot path.
 	authBuf     [4 + sha1.Size]byte // 4 bytes ROC + 20 bytes SHA1
 	rtcpAuthBuf [sha1.Size]byte
@@ -46,6 +52,7 @@ func newSrtpCipherAesCmHmacSha1(
 	profile protectionProfileWithArgs,
 	masterKey, masterSalt, mki []byte,
 	encryptSRTP, encryptSRTCP, useCryptex bool,
+	encryptedHeaderExtensionIDs []uint8,
 ) (*srtpCipherAesCmHmacSha1, error) {
 	switch profile.ProtectionProfile {
 	case ProtectionProfileNullHmacSha1_80, ProtectionProfileNullHmacSha1_32:
@@ -103,6 +110,10 @@ func newSrtpCipherAesCmHmacSha1(
 	srtpCipher.srtcpSessionAuth = hmac.New(sha1.New, srtcpSessionAuthTag)
 	srtpCipher.srtpSessionAuth = hmac.New(sha1.New, srtpSessionAuthTag)
 
+	if err = srtpCipher.setHeaderExtensionEncryption(masterKey, masterSalt, encryptedHeaderExtensionIDs); err != nil {
+		return nil, err
+	}
+
 	mkiLen := len(mki)
 	if mkiLen > 0 {
 		srtpCipher.mki = make([]byte, mkiLen)
@@ -110,6 +121,40 @@ func newSrtpCipherAesCmHmacSha1(
 	}
 
 	return srtpCipher, nil
+}
+
+// setHeaderExtensionEncryption derives the RFC 6904 header encryption and salting keys for the
+// configured extension IDs and stores the (copied) ID list.
+func (s *srtpCipherAesCmHmacSha1) setHeaderExtensionEncryption(
+	masterKey, masterSalt []byte,
+	encryptedHeaderExtensionIDs []uint8,
+) error {
+	if len(encryptedHeaderExtensionIDs) == 0 {
+		return nil
+	}
+
+	keyLen, err := s.ProtectionProfile.KeyLen()
+	if err != nil {
+		return err
+	}
+
+	headerSessionKey, err := aesCmKeyDerivation(labelSRTPHeaderEncryption, masterKey, masterSalt, 0, keyLen)
+	if err != nil {
+		return err
+	}
+
+	if s.headerEncryptionBlock, err = aes.NewCipher(headerSessionKey); err != nil {
+		return err
+	}
+
+	if s.headerSessionSalt, err = aesCmKeyDerivation(labelSRTPHeaderSalt, masterKey, masterSalt, 0, len(masterSalt)); err != nil {
+		return err
+	}
+
+	s.encryptedHeaderExtensionIDs = make([]uint8, len(encryptedHeaderExtensionIDs))
+	copy(s.encryptedHeaderExtensionIDs, encryptedHeaderExtensionIDs)
+
+	return nil
 }
 
 func (s *srtpCipherAesCmHmacSha1) encryptRTP(
@@ -179,6 +224,13 @@ func (s *srtpCipherAesCmHmacSha1) doEncryptRTP(dst []byte, header *rtp.Header, h
 	if err != nil {
 		return err
 	}
+
+	// RFC 6904: header extension encryption is applied after the payload has been encrypted
+	// and before the authentication tag is computed, so the tag covers the encrypted headers.
+	if _, err = s.cryptHeaderExtensions(dst, header, headerLen, roc); err != nil {
+		return err
+	}
+
 	n := headerLen + payloadLen
 
 	// Generate the auth tag.
@@ -233,6 +285,20 @@ func (s *srtpCipherAesCmHmacSha1) decryptRTP(
 	err = s.doDecryptRTP(dst, ciphertext, header, headerLen, roc, sameBuffer)
 	if err != nil {
 		return nil, err
+	}
+
+	// The authentication tag has been verified at this point, so RFC 6904 permits decrypting
+	// the header extension elements.
+	modified, err := s.cryptHeaderExtensions(dst, header, headerLen, roc)
+	if err != nil {
+		return nil, err
+	}
+	if modified {
+		// The caller's header may point into the ciphertext buffer rather than dst. Re-parse the
+		// extension block so that header.Extensions refers to the decrypted payload.
+		if _, err = header.Unmarshal(dst); err != nil {
+			return nil, err
+		}
 	}
 
 	return dst, nil

@@ -116,6 +116,10 @@ type Context struct {
 	authTagRTPLen *int
 
 	cryptexMode CryptexMode
+
+	// encryptedHeaderExtensionIDs holds the RFC 6904 extension element IDs whose payload is
+	// encrypted. Nil or empty disables header extension encryption.
+	encryptedHeaderExtensionIDs []uint8
 }
 
 // CreateContext creates a new SRTP Context.
@@ -155,6 +159,10 @@ func CreateContext(
 		return nil, err
 	}
 
+	if err = c.checkHeaderExtensionEncryption(); err != nil {
+		return nil, err
+	}
+
 	if c.authTagRTPLen != nil {
 		var authKeyLen int
 		authKeyLen, err = c.profile.AuthKeyLen()
@@ -191,6 +199,7 @@ func (c *Context) contextWithKey(masterKey, masterSalt []byte, profile Protectio
 		next.rocTransmitRate = c.rocTransmitRate
 		next.authTagRTPLen = c.authTagRTPLen
 		next.cryptexMode = c.cryptexMode
+		next.encryptedHeaderExtensionIDs = c.encryptedHeaderExtensionIDs
 
 		return nil
 	})
@@ -250,9 +259,13 @@ func (c *Context) createCipher(mki, masterKey, masterSalt []byte, encryptSRTP, e
 		ProtectionProfileAes128CmHmacSha1_80,
 		ProtectionProfileAes256CmHmacSha1_32,
 		ProtectionProfileAes256CmHmacSha1_80:
-		return newSrtpCipherAesCmHmacSha1(profileWithArgs, masterKey, masterSalt, mki, encryptSRTP, encryptSRTCP, useCryptex)
+		return newSrtpCipherAesCmHmacSha1(
+			profileWithArgs, masterKey, masterSalt, mki, encryptSRTP, encryptSRTCP, useCryptex,
+			c.encryptedHeaderExtensionIDs,
+		)
 	case ProtectionProfileNullHmacSha1_32, ProtectionProfileNullHmacSha1_80:
-		return newSrtpCipherAesCmHmacSha1(profileWithArgs, masterKey, masterSalt, mki, false, false, false)
+		return newSrtpCipherAesCmHmacSha1(profileWithArgs, masterKey, masterSalt, mki, false, false, false,
+			c.encryptedHeaderExtensionIDs)
 	default:
 		return nil, fmt.Errorf("%w: %#v", errNoSuchSRTPProfile, c.profile)
 	}
@@ -457,6 +470,48 @@ func (c *Context) checkRCCMode() error {
 
 	default:
 		return errUnsupportedRccMode
+	}
+
+	return nil
+}
+
+// checkHeaderExtensionEncryption validates the RFC 6904 configuration. It runs after all options
+// have been applied so that the conflicting options are detected regardless of their order.
+func (c *Context) checkHeaderExtensionEncryption() error {
+	if len(c.encryptedHeaderExtensionIDs) == 0 {
+		return nil
+	}
+
+	if c.cryptexMode != CryptexModeDisabled {
+		return errHeaderExtensionEncryptionAndCryptex
+	}
+
+	switch c.profile {
+	case ProtectionProfileAes128CmHmacSha1_32,
+		ProtectionProfileAes128CmHmacSha1_80,
+		ProtectionProfileAes256CmHmacSha1_32,
+		ProtectionProfileAes256CmHmacSha1_80:
+	default:
+		// RFC 6904 defines the keystream for the AES-CM, AES-f8, SEED-CTR, AES_192_CM and
+		// AES_256_CM transforms, and an all-zero keystream for NULL. This package implements the
+		// AES-CM family only; AEAD (AES-GCM) profiles use the payload transform for the header
+		// extension as well and are deliberately rejected here.
+		return fmt.Errorf("%w: %s", errUnsupportedHeaderExtensionProfile, c.profile)
+	}
+
+	seen := make(map[uint8]struct{}, len(c.encryptedHeaderExtensionIDs))
+	for _, id := range c.encryptedHeaderExtensionIDs {
+		// ID 0 is the RFC 5285 padding value and can never identify an element, so encrypting it
+		// would silently do nothing. ID 15 is only reserved in the one-byte form; it is accepted
+		// here because it is a valid identifier in the two-byte form.
+		if id == 0 {
+			return fmt.Errorf("%w: %d", errInvalidEncryptedHeaderExtensionID, id)
+		}
+
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("%w: %d", errDuplicateEncryptedHeaderExtension, id)
+		}
+		seen[id] = struct{}{}
 	}
 
 	return nil

@@ -27,6 +27,18 @@ func newSrtpCipherAesCmHmacSha1WithDerivedKeys(
 	keys derivedSessionKeys,
 	encryptSRTP, encryptSRTCP bool,
 ) (*srtpCipherAesCmHmacSha1, error) {
+	return newSrtpCipherAesCmHmacSha1WithDerivedKeysAndHeaderKeys(profile, keys, encryptSRTP, encryptSRTCP, nil, nil)
+}
+
+// newSrtpCipherAesCmHmacSha1WithDerivedKeysAndHeaderKeys is the RFC 6904 variant: it additionally
+// injects the header encryption key/salt derived by the test vector instead of deriving them.
+func newSrtpCipherAesCmHmacSha1WithDerivedKeysAndHeaderKeys(
+	profile ProtectionProfile,
+	keys derivedSessionKeys,
+	encryptSRTP, encryptSRTCP bool,
+	headerSessionKey, headerSessionSalt []byte,
+	encryptedHeaderExtensionIDs ...uint8,
+) (*srtpCipherAesCmHmacSha1, error) {
 	if profile == ProtectionProfileNullHmacSha1_80 || profile == ProtectionProfileNullHmacSha1_32 {
 		encryptSRTP = false
 		encryptSRTCP = false
@@ -45,6 +57,14 @@ func newSrtpCipherAesCmHmacSha1WithDerivedKeys(
 
 	if srtpCipher.srtcpBlock, err = aes.NewCipher(keys.srtcpSessionKey); err != nil {
 		return nil, err
+	}
+
+	if len(encryptedHeaderExtensionIDs) > 0 {
+		if srtpCipher.headerEncryptionBlock, err = aes.NewCipher(headerSessionKey); err != nil {
+			return nil, err
+		}
+		srtpCipher.headerSessionSalt = headerSessionSalt
+		srtpCipher.encryptedHeaderExtensionIDs = append([]uint8{}, encryptedHeaderExtensionIDs...)
 	}
 
 	srtpCipher.srtpSessionSalt = keys.srtpSessionSalt

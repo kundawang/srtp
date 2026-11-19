@@ -233,9 +233,56 @@ func SRTPAuthenticationTagLength(authTagRTPLen int) ContextOption { // nolint:re
 
 // Cryptex allows to enable Cryptex mechanism to completely encrypt RTP Header Extensions and Contributing
 // Sources, as defined in RFC 9335.
+//
+// Cryptex cannot be combined with SRTPHeaderExtensionEncryption: Cryptex encrypts the whole extension
+// block, while RFC 6904 requires the element headers and unselected elements to stay readable.
 func Cryptex(cryptexMode CryptexMode) ContextOption {
 	return func(c *Context) error {
+		// This option is updatable at runtime, so the conflict with RFC 6904 header extension
+		// encryption must be checked here as well as in CreateContext.
+		if cryptexMode != CryptexModeDisabled && len(c.encryptedHeaderExtensionIDs) > 0 {
+			return errHeaderExtensionEncryptionAndCryptex
+		}
+
 		c.cryptexMode = cryptexMode
+
+		return nil
+	}
+}
+
+// SRTPHeaderExtensionEncryption enables selective RTP header extension encryption as defined in RFC 6904.
+// Only the payload of the RFC 8285 header extension elements whose IDs are given in
+// encryptedHeaderExtensionIDs is encrypted; all other elements, including their IDs, lengths and the
+// extension padding, stay in the clear. This lets intermediate nodes inspect the remaining extensions
+// while a specific value (for example the speaker/sound level indication from RFC 6464) is hidden.
+//
+// The same list must be configured on both the encrypting and the decrypting Context, and it must match
+// the extension IDs negotiated out of band (the RFC 6904 "urn:ietf:params:rtp-hdrext:encrypt" SDP extmap).
+//
+// Constraints:
+//   - Only AES-CM profiles are supported. AEAD (AES-GCM) profiles do not implement RFC 6904 in this
+//     package and CreateContext returns errUnsupportedHeaderExtensionProfile. NULL profiles cannot
+//     encrypt anything and are rejected for the same reason.
+//   - IDs must not be repeated, and ID 0 (the RFC 5285 padding value) is rejected. Passing no IDs
+//     leaves the feature disabled.
+//   - It cannot be combined with Cryptex (RFC 9335), which encrypts the whole extension block.
+//
+// Unlike Cryptex, this option can only be set during Context construction. Use
+// SessionSRTP.UpdateKey or a new Context to change it, because senders and receivers must agree on the
+// protected IDs for every packet.
+func SRTPHeaderExtensionEncryption(encryptedHeaderExtensionIDs ...uint8) ContextOption { //nolint:revive
+	return func(c *Context) error {
+		if c.constructed {
+			return ErrContextOptionNotUpdatable
+		}
+
+		if len(encryptedHeaderExtensionIDs) > 0 && c.cryptexMode != CryptexModeDisabled {
+			return errHeaderExtensionEncryptionAndCryptex
+		}
+
+		ids := make([]uint8, len(encryptedHeaderExtensionIDs))
+		copy(ids, encryptedHeaderExtensionIDs)
+		c.encryptedHeaderExtensionIDs = ids
 
 		return nil
 	}

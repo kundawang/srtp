@@ -46,8 +46,14 @@ var (
 
 	errUnsupportedHeaderExtension   = errors.New("unsupported header extension")
 	errHeaderLengthMismatch         = errors.New("header length mismatch")
+	errTruncatedHeaderExtension     = errors.New("truncated header extension")
 	errUnencryptedHeaderExtAndCSRCs = errors.New("unencrypted header extensions and CSRCs are not allowed")
 	errCryptexDisabled              = errors.New("cryptex is disabled")
+
+	errInvalidEncryptedHeaderExtensionID   = errors.New("header extension ID cannot be encrypted")
+	errDuplicateEncryptedHeaderExtension   = errors.New("duplicate encrypted header extension ID")
+	errUnsupportedHeaderExtensionProfile   = errors.New("unsupported header extension encryption profile")
+	errHeaderExtensionEncryptionAndCryptex = errors.New("header extension encryption cannot be combined with Cryptex")
 )
 
 type duplicatedError struct {

@@ -265,6 +265,16 @@ func (s *SessionSRTP) UpdateRemoteOptions(opts ...ContextOption) error {
 	return s.remoteContext.UpdateOptions(opts...)
 }
 
+// SetRemoteReplayWindow sets the SRTP replay protection window size of the remote
+// (decrypting) context for a single SSRC. Unlike Context.SetSRTPReplayWindow, this
+// is safe to call concurrently with the session's read loop.
+func (s *SessionSRTP) SetRemoteReplayWindow(ssrc uint32, windowSize uint) error {
+	s.session.remoteContextMutex.Lock()
+	defer s.session.remoteContextMutex.Unlock()
+
+	return s.remoteContext.SetSRTPReplayWindow(ssrc, windowSize)
+}
+
 // UpdateKey resets packet state with fresh keys.
 func (s *SessionSRTP) UpdateKey(keys SessionKeys, profile ProtectionProfile) error {
 	return s.session.updateKey(keys, profile)

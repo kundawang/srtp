@@ -6,6 +6,7 @@ package srtp
 import (
 	"bytes"
 	"fmt"
+	"maps"
 
 	"github.com/pion/transport/v5/replaydetector"
 )
@@ -100,6 +101,12 @@ type Context struct {
 	newSRTCPReplayDetector func() replaydetector.ReplayDetector
 	newSRTPReplayDetector  func() replaydetector.ReplayDetector
 
+	// Per-SSRC replay window overrides, configured with SetSRTPReplayWindow and
+	// SetSRTCPReplayWindow. SSRCs absent from these maps use the detectors created
+	// by newSRTPReplayDetector/newSRTCPReplayDetector.
+	srtpReplayWindows  map[uint32]uint
+	srtcpReplayWindows map[uint32]uint
+
 	profile ProtectionProfile
 
 	// Master Key Identifier used for encrypting RTP/RTCP packets. Set to nil if MKI is not enabled.
@@ -131,10 +138,12 @@ func CreateContext(
 	opts ...ContextOption,
 ) (c *Context, err error) {
 	c = &Context{
-		srtpSSRCStates:  map[uint32]*srtpSSRCState{},
-		srtcpSSRCStates: map[uint32]*srtcpSSRCState{},
-		profile:         profile,
-		mkis:            map[string]srtpCipher{},
+		srtpSSRCStates:     map[uint32]*srtpSSRCState{},
+		srtcpSSRCStates:    map[uint32]*srtcpSSRCState{},
+		srtpReplayWindows:  map[uint32]uint{},
+		srtcpReplayWindows: map[uint32]uint{},
+		profile:            profile,
+		mkis:               map[string]srtpCipher{},
 	}
 
 	for _, o := range append(
@@ -184,6 +193,8 @@ func (c *Context) contextWithKey(masterKey, masterSalt []byte, profile Protectio
 	return CreateContext(masterKey, masterSalt, profile, func(next *Context) error {
 		next.newSRTPReplayDetector = c.newSRTPReplayDetector
 		next.newSRTCPReplayDetector = c.newSRTCPReplayDetector
+		next.srtpReplayWindows = maps.Clone(c.srtpReplayWindows)
+		next.srtcpReplayWindows = maps.Clone(c.srtcpReplayWindows)
 		next.sendMKI = bytes.Clone(c.sendMKI)
 		next.encryptSRTP = c.encryptSRTP
 		next.encryptSRTCP = c.encryptSRTCP
@@ -347,7 +358,7 @@ func (c *Context) getSRTPSSRCState(ssrc uint32, keepNew bool) (*srtpSSRCState, b
 
 	state = &srtpSSRCState{
 		ssrc:           ssrc,
-		replayDetector: c.newSRTPReplayDetector(),
+		replayDetector: c.newSRTPReplayDetectorFor(ssrc),
 	}
 	state.checkAccepter, _ = state.replayDetector.(replaydetector.CheckAccepter)
 	if keepNew {
@@ -365,7 +376,7 @@ func (c *Context) getSRTCPSSRCState(ssrc uint32, keepNew bool) (*srtcpSSRCState,
 
 	state = &srtcpSSRCState{
 		ssrc:           ssrc,
-		replayDetector: c.newSRTCPReplayDetector(),
+		replayDetector: c.newSRTCPReplayDetectorFor(ssrc),
 	}
 	state.checkAccepter, _ = state.replayDetector.(replaydetector.CheckAccepter)
 	if keepNew {

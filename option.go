@@ -16,6 +16,8 @@ import (
 type ContextOption func(*Context) error
 
 // SRTPReplayProtection sets SRTP replay protection window size.
+// The created detectors support runtime per-SSRC resizing through
+// Context.SetSRTPReplayWindow.
 func SRTPReplayProtection(windowSize uint) ContextOption { // nolint:revive
 	return func(c *Context) error {
 		if c.constructed {
@@ -23,7 +25,7 @@ func SRTPReplayProtection(windowSize uint) ContextOption { // nolint:revive
 		}
 
 		c.newSRTPReplayDetector = func() replaydetector.ReplayDetector {
-			return replaydetector.New(windowSize, maxROC<<16|maxSequenceNumber)
+			return newResizableReplayDetector(windowSize, maxROC<<16|maxSequenceNumber)
 		}
 
 		return nil
@@ -31,6 +33,8 @@ func SRTPReplayProtection(windowSize uint) ContextOption { // nolint:revive
 }
 
 // SRTCPReplayProtection sets SRTCP replay protection window size.
+// The created detectors support runtime per-SSRC resizing through
+// Context.SetSRTCPReplayWindow.
 func SRTCPReplayProtection(windowSize uint) ContextOption {
 	return func(c *Context) error {
 		if c.constructed {
@@ -38,7 +42,7 @@ func SRTCPReplayProtection(windowSize uint) ContextOption {
 		}
 
 		c.newSRTCPReplayDetector = func() replaydetector.ReplayDetector {
-			return replaydetector.New(windowSize, maxSRTCPIndex)
+			return newResizableReplayDetector(windowSize, maxSRTCPIndex)
 		}
 
 		return nil

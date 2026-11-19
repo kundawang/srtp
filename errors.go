@@ -15,6 +15,13 @@ var (
 	ErrMKINotFound = errors.New("MKI not found")
 	// ErrContextOptionNotUpdatable indicates an option cannot be updated after construction.
 	ErrContextOptionNotUpdatable = errors.New("option can only be set during context construction")
+	// ErrInvalidReplayWindowSize is returned when a per-SSRC replay window size is zero
+	// or exceeds MaxReplayWindowSize.
+	ErrInvalidReplayWindowSize = errors.New("invalid replay window size")
+	// ErrReplayDetectorNotResizable is returned when adjusting the replay window of an
+	// SSRC whose live replay detector was created by a custom factory (or replay
+	// protection was disabled) and therefore does not support runtime resizing.
+	ErrReplayDetectorNotResizable = errors.New("replay detector does not support runtime window resize")
 
 	errDuplicated                    = errors.New("duplicated packet")
 	errShortSrtpMasterKey            = errors.New("SRTP master key is not long enough")

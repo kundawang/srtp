@@ -260,6 +260,16 @@ func (s *SessionSRTCP) decrypt(buf []byte, attrs packetio.Attributes) error {
 	return parseErrs
 }
 
+// SetRemoteReplayWindow sets the SRTCP replay protection window size of the remote
+// (decrypting) context for a single SSRC. Unlike Context.SetSRTCPReplayWindow, this
+// is safe to call concurrently with the session's read loop.
+func (s *SessionSRTCP) SetRemoteReplayWindow(ssrc uint32, windowSize uint) error {
+	s.session.remoteContextMutex.Lock()
+	defer s.session.remoteContextMutex.Unlock()
+
+	return s.remoteContext.SetSRTCPReplayWindow(ssrc, windowSize)
+}
+
 // UpdateKey resets packet state with fresh keys.
 func (s *SessionSRTCP) UpdateKey(keys SessionKeys, profile ProtectionProfile) error {
 	return s.session.updateKey(keys, profile)

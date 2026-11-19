@@ -107,6 +107,12 @@ type Context struct {
 	// Master Key Identifier to cipher mapping. Used for decrypting packets. Empty if MKI is not enabled.
 	mkis map[string]srtpCipher
 
+	// rotationConfig holds the SRTPKeyRotation option values until the rotator
+	// is built at the end of CreateContext. rotator is nil unless key rotation
+	// was configured.
+	rotationConfig *rotationConfig
+	rotator        *keyRotator
+
 	encryptSRTP  bool
 	encryptSRTCP bool
 
@@ -174,6 +180,12 @@ func CreateContext(
 		c.mkis[string(c.sendMKI)] = c.cipher
 	}
 
+	if c.rotationConfig != nil {
+		if c.rotator, err = c.newKeyRotator(c.rotationConfig); err != nil {
+			return nil, err
+		}
+	}
+
 	c.constructed = true
 
 	return c, nil
@@ -191,6 +203,7 @@ func (c *Context) contextWithKey(masterKey, masterSalt []byte, profile Protectio
 		next.rocTransmitRate = c.rocTransmitRate
 		next.authTagRTPLen = c.authTagRTPLen
 		next.cryptexMode = c.cryptexMode
+		next.rotationConfig = c.rotationConfig
 
 		return nil
 	})
@@ -485,5 +498,9 @@ func (c *Context) updateCryptexForCiphers() {
 
 	for _, cipher := range c.mkis {
 		cipher.setCryptex(useCryptex)
+	}
+
+	if c.rotator != nil {
+		c.rotator.setCryptex(useCryptex)
 	}
 }

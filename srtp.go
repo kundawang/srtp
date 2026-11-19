@@ -67,18 +67,22 @@ func (c *Context) decryptRTP(dst, ciphertext []byte, header *rtp.Header, headerL
 	// Safety relies on the replay detector only committing the index as "seen"
 	// after successful authentication, when Accept() (or markAsValid, for
 	// detectors without CheckAccepter support) is explicitly called below.
+	// When key rotation is enabled the replay check is deferred to the
+	// rotator, which keeps a separate replay detector per key.
 	var markAsValid func() bool
 	var tok replaydetector.Token
 	var ok bool
-	if ssrcState.checkAccepter != nil {
-		tok = ssrcState.checkAccepter.CheckSeq(index)
-		ok = tok.Passed()
-	} else {
-		markAsValid, ok = ssrcState.replayDetector.Check(index)
-	}
-	if !ok {
-		return nil, &duplicatedError{
-			Proto: "srtp", SSRC: header.SSRC, Index: uint32(header.SequenceNumber),
+	if c.rotator == nil {
+		if ssrcState.checkAccepter != nil {
+			tok = ssrcState.checkAccepter.CheckSeq(index)
+			ok = tok.Passed()
+		} else {
+			markAsValid, ok = ssrcState.replayDetector.Check(index)
+		}
+		if !ok {
+			return nil, &duplicatedError{
+				Proto: "srtp", SSRC: header.SSRC, Index: uint32(header.SequenceNumber),
+			}
 		}
 	}
 
@@ -88,7 +92,16 @@ func (c *Context) decryptRTP(dst, ciphertext []byte, header *rtp.Header, headerL
 	}
 
 	cipher := c.cipher
-	if len(c.mkis) > 0 {
+	var rotToken *rotationRecvToken
+	switch {
+	case c.rotator != nil:
+		// The rotator owns MKI lookup and replay protection for this packet.
+		actualMKI := ciphertext[len(ciphertext)-mkiLen-authTagLen : len(ciphertext)-authTagLen]
+		cipher, rotToken, err = c.rotator.recvCheck(header.SSRC, header.SequenceNumber, actualMKI, index)
+		if err != nil {
+			return nil, err
+		}
+	case len(c.mkis) > 0:
 		// Find cipher for MKI
 		actualMKI := ciphertext[len(ciphertext)-mkiLen-authTagLen : len(ciphertext)-authTagLen]
 		cipher, ok = c.mkis[string(actualMKI)]
@@ -104,9 +117,12 @@ func (c *Context) decryptRTP(dst, ciphertext []byte, header *rtp.Header, headerL
 		return nil, err
 	}
 
-	if ssrcState.checkAccepter != nil {
+	switch {
+	case rotToken != nil:
+		c.rotator.recvAccept(rotToken)
+	case ssrcState.checkAccepter != nil:
 		ssrcState.checkAccepter.Accept(tok)
-	} else {
+	default:
 		markAsValid()
 	}
 	ssrcState.updateRolloverCount(header.SequenceNumber, diff, hasRocInPacket, roc)
@@ -175,7 +191,14 @@ func (c *Context) encryptRTP(dst []byte, header *rtp.Header, headerLen int, plai
 
 	rocInPacket := c.rccMode != RCCModeNone && header.SequenceNumber%c.rocTransmitRate == 0
 
-	return c.cipher.encryptRTP(dst, header, headerLen, plaintext, roc, rocInPacket)
+	cipher := c.cipher
+	if c.rotator != nil {
+		// Key rotation selects the cipher (and its MKI) per SSRC based on the
+		// number of packets already sent.
+		cipher = c.rotator.sendCipher(header.SSRC)
+	}
+
+	return cipher.encryptRTP(dst, header, headerLen, plaintext, roc, rocInPacket)
 }
 
 func (c *Context) hasROCInPacket(header *rtp.Header, authTagLen int) (bool, int) {

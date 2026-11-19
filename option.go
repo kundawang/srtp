@@ -125,6 +125,46 @@ func MasterKeyIndicator(mki []byte) ContextOption {
 	}
 }
 
+// SRTPKeyRotation enables packet-count-driven key rotation for SRTP (RTP)
+// packets, for long-lived streams that must re-key without dropping packets.
+//
+// The key sequence starts with the Context's initial master key (index 0),
+// which must have an MKI configured via MasterKeyIndicator, followed by the
+// given keys in order. Packet counting is per SSRC: after packetsPerKey
+// packets have been encrypted for an SSRC, the sender automatically switches
+// to the next key and its MKI. When the sequence is exhausted the last key
+// keeps being used. The current state is observable via SendRotationState and
+// ReceiveRotationState.
+//
+// On the receive side every key gets its own replay detector. After the
+// newest key advances, late packets carrying an older MKI are still accepted
+// until receiveGracePackets further packets have been authenticated with newer
+// keys; then the old keys are removed and their packets are rejected with
+// ErrMKINotFound. Packets that fail authentication never advance the rotation
+// state nor consume the replay window.
+//
+// Rotation applies to SRTP only; SRTCP packets keep using the initial key.
+// Do not combine this option with AddCipherForMKI/RemoveMKI/SetSendMKI: the
+// rotator takes over MKI management for SRTP.
+//
+// The rotation state itself is safe for concurrent use; the rest of the
+// Context keeps its existing synchronization contract.
+func SRTPKeyRotation(keys []RotationKey, packetsPerKey, receiveGracePackets uint64) ContextOption { // nolint:revive
+	return func(c *Context) error {
+		if c.constructed {
+			return ErrContextOptionNotUpdatable
+		}
+
+		c.rotationConfig = &rotationConfig{
+			keys:                keys,
+			packetsPerKey:       packetsPerKey,
+			receiveGracePackets: receiveGracePackets,
+		}
+
+		return nil
+	}
+}
+
 // SRTPEncryption enables SRTP encryption.
 func SRTPEncryption() ContextOption { // nolint:revive
 	return func(c *Context) error {

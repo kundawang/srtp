@@ -35,6 +35,8 @@ var (
 	errInvalidMKILength              = errors.New("invalid MKI length")
 	errTooLongSRTPAuthTag            = errors.New("SRTP auth tag is too long")
 	errTooShortSRTPAuthTag           = errors.New("SRTP auth tag is too short")
+	errRotationNoKeys                = errors.New("key rotation requires at least one key")
+	errZeroPacketsPerKey             = errors.New("packets per key is zero")
 
 	errStreamNotInited     = errors.New("stream has not been inited, unable to close")
 	errStreamAlreadyClosed = errors.New("stream is already closed")
